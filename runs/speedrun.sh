@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # This script is configured to train your own GPT-2 grade LLM (pretraining + finetuning)
-# It is designed to run on a blank 8XH100 GPU node and takes approximately 3 hours to complete.
+# It auto-detects the number of GPUs and adapts settings accordingly.
+# On 8×H100: ~3 hours. On 2×RTX PRO 6000 Blackwell: ~25 hours.
 
 # 1) Example launch (simplest):
 # bash runs/speedrun.sh
@@ -9,6 +10,31 @@
 # screen -L -Logfile runs/speedrun.log -S speedrun bash runs/speedrun.sh
 # 3) Example launch with wandb logging, but see below for setting up wandb first:
 # WANDB_RUN=speedrun screen -L -Logfile runs/speedrun.log -S speedrun bash runs/speedrun.sh
+
+# Hardware detection
+NPROC_PER_NODE="${NPROC_PER_NODE:-$(nvidia-smi -L | wc -l)}"
+
+# Auto-detect window pattern: Hopper (sm90) supports FA3 with efficient sliding window (SSSL),
+# but other architectures (Blackwell, Ada, etc.) fall back to SDPA where sliding window requires
+# an explicit attention mask and loses the is_causal=True fast path. Use "L" (full context) on non-Hopper.
+if [ -z "$WINDOW_PATTERN" ]; then
+    GPU_ARCH=$(python -c "import torch; print(torch.cuda.get_device_capability()[0])" 2>/dev/null)
+    if [ "$GPU_ARCH" = "9" ]; then
+        WINDOW_PATTERN="SSSL"
+    else
+        WINDOW_PATTERN="L"
+    fi
+fi
+
+# Auto-detect device batch size based on GPU VRAM
+if [ -z "$DEVICE_BATCH_SIZE" ]; then
+    VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1 | tr -d ' ')
+    if [ "$VRAM_MB" -ge 92160 ] 2>/dev/null; then  # >= 90GB
+        DEVICE_BATCH_SIZE=32
+    else
+        DEVICE_BATCH_SIZE=16
+    fi
+fi
 
 # Default intermediate artifacts directory is in ~/.cache/nanochat
 export OMP_NUM_THREADS=1
@@ -70,9 +96,9 @@ echo "Waiting for dataset download to complete..."
 wait $DATASET_DOWNLOAD_PID
 
 # d24 model (slightly overtrained is enough to beat GPT-2 => increase data:params ratio from compute optimal 10.5 (default) to 12)
-torchrun --standalone --nproc_per_node=8 -m scripts.base_train -- --depth=26 --target-param-data-ratio=8.25 --device-batch-size=16 --fp8 --run=$WANDB_RUN
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- --depth=26 --target-param-data-ratio=8.25 --device-batch-size=$DEVICE_BATCH_SIZE --window-pattern=$WINDOW_PATTERN --fp8 --run=$WANDB_RUN
 # evaluate the model: CORE metric, BPB on train/val, and draw samples
-torchrun --standalone --nproc_per_node=8 -m scripts.base_eval -- --device-batch-size=16
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_eval -- --device-batch-size=$DEVICE_BATCH_SIZE
 
 # -----------------------------------------------------------------------------
 # SFT (teach the model conversation special tokens, tool use, multiple choice)
@@ -82,8 +108,8 @@ torchrun --standalone --nproc_per_node=8 -m scripts.base_eval -- --device-batch-
 curl -L -o $NANOCHAT_BASE_DIR/identity_conversations.jsonl https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl
 
 # run SFT and eval the model
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_sft -- --device-batch-size=16 --run=$WANDB_RUN
-torchrun --standalone --nproc_per_node=8 -m scripts.chat_eval -- -i sft
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_sft -- --device-batch-size=$DEVICE_BATCH_SIZE --run=$WANDB_RUN
+torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.chat_eval -- -i sft
 
 # chat with the model over CLI! Leave out the -p to chat interactively
 # python -m scripts.chat_cli -p "Why is the sky blue?"

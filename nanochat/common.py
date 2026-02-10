@@ -209,11 +209,16 @@ def get_peak_flops(device_name: str) -> float:
 
     # Table order matters: more specific patterns first.
     _PEAK_FLOPS_TABLE = (
-        # NVIDIA Blackwell
+        # NVIDIA Blackwell data center
         (["gb200"], 2.5e15),
         (["grace blackwell"], 2.5e15),
         (["b200"], 2.25e15),
         (["b100"], 1.8e15),
+        # NVIDIA Blackwell workstation (no BF16 tensor core throttle unlike consumer cards)
+        # RTX PRO 6000 Max-Q: 188 SMs, 2285 MHz boost, 300W TDP => ~440 TFLOPS BF16
+        # RTX PRO 6000: 188 SMs, ~2600 MHz boost, 600W TDP => ~500 TFLOPS BF16
+        (["rtx pro 6000", "max-q"], 440e12),
+        (["rtx pro 6000"], 500e12),
         # NVIDIA Hopper
         (["h200", "nvl"], 836e12),
         (["h200", "pcie"], 836e12),

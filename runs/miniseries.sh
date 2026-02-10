@@ -30,7 +30,13 @@ SERIES_NAME="${1:-${SERIES_NAME:-$(date +%b%d | tr '[:upper:]' '[:lower:]')}}"
 # Depths to train (the "miniseries")
 DEPTHS=(12 14 16 18 20 22 24 26)
 # Hardware
-NPROC_PER_NODE="${NPROC_PER_NODE:-8}"
+NPROC_PER_NODE="${NPROC_PER_NODE:-$(nvidia-smi -L | wc -l)}"
+# Detect VRAM for batch size scaling (>= 90GB allows larger batches)
+VRAM_MB=$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits | head -1 | tr -d ' ')
+LARGE_VRAM=0
+if [ "$VRAM_MB" -ge 92160 ] 2>/dev/null; then  # >= 90GB
+    LARGE_VRAM=1
+fi
 # Logging
 WANDB_RUN="${WANDB_RUN:-${SERIES_NAME}_miniseries}"
 
@@ -58,12 +64,23 @@ for d in "${DEPTHS[@]}"; do
     START_TIME=$(date +%s)
 
     # Reduce --device-batch-size to avoid OOM at larger depths
-    if [ $d -ge 28 ]; then
-        DEVICE_BATCH_SIZE_ARG="--device-batch-size=8"
-    elif [ $d -ge 20 ]; then
-        DEVICE_BATCH_SIZE_ARG="--device-batch-size=16"
+    # GPUs with >= 90GB VRAM (e.g. 96GB RTX PRO 6000) can use larger batches
+    if [ $LARGE_VRAM -eq 1 ]; then
+        if [ $d -ge 28 ]; then
+            DEVICE_BATCH_SIZE_ARG="--device-batch-size=16"
+        elif [ $d -ge 20 ]; then
+            DEVICE_BATCH_SIZE_ARG="--device-batch-size=32"
+        else
+            DEVICE_BATCH_SIZE_ARG="--device-batch-size=64"
+        fi
     else
-        DEVICE_BATCH_SIZE_ARG="--device-batch-size=32"
+        if [ $d -ge 28 ]; then
+            DEVICE_BATCH_SIZE_ARG="--device-batch-size=8"
+        elif [ $d -ge 20 ]; then
+            DEVICE_BATCH_SIZE_ARG="--device-batch-size=16"
+        else
+            DEVICE_BATCH_SIZE_ARG="--device-batch-size=32"
+        fi
     fi
 
     torchrun --standalone --nproc_per_node=$NPROC_PER_NODE -m scripts.base_train -- \

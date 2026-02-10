@@ -2,7 +2,8 @@
 Unified Flash Attention interface with automatic FA3/SDPA switching.
 
 Exports `flash_attn` module that matches the FA3 API exactly, but falls back
-to PyTorch SDPA on non-Hopper GPUs (including Blackwell), MPS, and CPU.
+to PyTorch SDPA on older GPUs, MPS, and CPU. Blackwell (sm100+) will attempt
+FA3 and fall back to SDPA if the kernels package doesn't have Blackwell support.
 
 Usage (drop-in replacement for FA3):
     from nanochat.flash_attention import flash_attn
@@ -21,14 +22,16 @@ import torch.nn.functional as F
 # Detection: Try to load FA3 on Hopper+ GPUs
 # =============================================================================
 def _load_flash_attention_3():
-    """Try to load Flash Attention 3 (requires Hopper GPU, sm90)."""
+    """Try to load Flash Attention 3 (requires Hopper+ GPU, sm90+)."""
     if not torch.cuda.is_available():
         return None
     try:
         major, _ = torch.cuda.get_device_capability()
-        # FA3 kernels are compiled for Hopper (sm90) only
-        # Ada (sm89), Blackwell (sm100) need SDPA fallback until FA3 is recompiled
-        if major != 9:
+        # FA3 kernels require at least Hopper (sm90). Skip older architectures.
+        # Hopper (major=9) is fully supported. Blackwell (major=12) and future
+        # architectures will attempt to load FA3 — if the kernels package lacks
+        # support, the import/get_kernel below will raise and we fall back to SDPA.
+        if major < 9:
             return None
         import os
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
