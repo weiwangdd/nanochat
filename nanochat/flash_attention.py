@@ -36,7 +36,25 @@ def _load_flash_attention_3():
         import os
         os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
         from kernels import get_kernel
-        return get_kernel('varunneal/flash-attention-3').flash_attn_interface
+        fa3 = get_kernel('varunneal/flash-attention-3').flash_attn_interface
+        # The kernels package may load successfully but lack compiled binaries
+        # for this GPU arch (e.g. Blackwell sm120 with Hopper-only kernels).
+        # The resulting CUDA error is fatal and uncatchable in-process, so we
+        # probe in a subprocess to verify the kernel actually executes.
+        if major != 9:  # Hopper is known-good, skip probe
+            import subprocess, sys
+            probe = subprocess.run(
+                [sys.executable, "-c",
+                 "import torch; from kernels import get_kernel; "
+                 "fa3 = get_kernel('varunneal/flash-attention-3').flash_attn_interface; "
+                 "q = torch.zeros(1,1,1,64, device='cuda', dtype=torch.bfloat16); "
+                 "fa3.flash_attn_func(q, q, q, causal=True)"],
+                capture_output=True, timeout=30,
+                env={**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"},
+            )
+            if probe.returncode != 0:
+                return None
+        return fa3
     except Exception:
         return None
 
